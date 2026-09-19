@@ -1,0 +1,15 @@
+target/
+.venv/
+.tools/
+.idea/
+*.iml
+.DS_Store
+benchmark/data/mnist/raw/
+benchmark/data/fashion-mnist/raw/
+__pycache__/
+*.py[cod]
+# Keep old saved-note files private after removing that feature.
+jayce-memory.json
+jayce-prototypes.npz
+jayce-prototypes-*.npz
+.jayce-prototypes-*.tmp

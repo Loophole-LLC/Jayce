@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Copyright (C) 2026 Loophole, LLC.
+# SPDX-License-Identifier: AGPL-3.0-only
+# See LICENSE.md in the repository root for terms and warranty information.
+
+# Start from a checkout. uv manages Python, .venv, and the locked dependencies.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
+if command -v uv >/dev/null 2>&1; then
+  JAYCE_UV="$(command -v uv)"
+else
+  JAYCE_UV="$SCRIPT_DIR/.tools/uv"
+  if [[ ! -x "$JAYCE_UV" ]]; then
+    if ! command -v curl >/dev/null 2>&1; then
+      printf 'Install uv from https://docs.astral.sh/uv/getting-started/installation/ and run ./jayce again.\n' >&2
+      exit 1
+    fi
+    printf 'First run: downloading uv into .tools (no shell profile changes).\n'
+    installer="$(mktemp)"
+    trap 'rm -f "$installer"' EXIT
+    if ! curl -LsSf --retry 2 --connect-timeout 15 https://astral.sh/uv/0.12.0/install.sh -o "$installer" ||
+       ! UV_UNMANAGED_INSTALL="$SCRIPT_DIR/.tools" sh "$installer"; then
+      printf 'Setup could not finish. Check your connection and run ./jayce again.\n' >&2
+      exit 1
+    fi
+    rm -f "$installer"
+    trap - EXIT
+  fi
+fi
+
+if [[ ! -d "$SCRIPT_DIR/.venv" ]]; then
+  printf 'First run: uv will prepare Python 3.12 and the chat packages.\n'
+fi
+
+exec "$JAYCE_UV" run --locked --project "$SCRIPT_DIR" python "$SCRIPT_DIR/jayce.py" "$@"

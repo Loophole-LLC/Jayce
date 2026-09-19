@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Copyright (C) 2026 Loophole, LLC.
+# SPDX-License-Identifier: AGPL-3.0-only
+# See LICENSE.md in the repository root for terms and warranty information.
+
+# Run the whole Jayce-vs-backprop benchmark with one command:
+#   1. download the datasets if they are missing and verify their checksums
+#   2. smoke checks (gradient check and data-stream setup)
+#   3. tune on the validation seeds
+#   4. test on the held-out seeds
+#
+#   ./benchmark/run-benchmark [output-dir]
+#
+# The output directory is relative to the benchmark/ folder and must be new. By default it is
+# target/run-<date>-<time>. Tuning and testing are the long steps.
+set -euo pipefail
+
+HERE="$(cd -- "$(dirname -- "$0")" && pwd)"
+cd "$HERE"
+
+source ./scripts/require_java.sh
+require_java
+
+OUT="${1:-target/run-$(date +%Y%m%d-%H%M%S)}"
+case "$OUT" in
+  /*) FULL="$OUT" ;;
+  *) FULL="$HERE/$OUT" ;;
+esac
+
+# Refuse before spending any time if this directory already holds a run.
+for name in validation.csv selected.csv freeze.sha256 source.zip; do
+  if [[ -e "$FULL/$name" ]]; then
+    printf 'Output directory %s already contains %s. Choose a new directory.\n' "$FULL" "$name" >&2
+    exit 1
+  fi
+done
+
+step() { printf '\n==> %s\n' "$1"; STEP_START=$SECONDS; }
+finished() { printf '    done in %ds\n' $((SECONDS - STEP_START)); }
+
+step "1/4 Data: download if missing and verify checksums"
+./scripts/download_benchmark_data.sh
+finished
+
+step "2/4 Smoke checks"
+./benchmark-java smoke
+finished
+
+step "3/4 Tune on the validation seeds -> $FULL"
+./benchmark-java tune "$OUT"
+finished
+
+step "4/4 Test on the held-out seeds -> $FULL"
+./benchmark-java test "$OUT"
+finished
+
+printf '\nFinished in %ds. Results in %s:\n' "$SECONDS" "$FULL"
+ls "$FULL"
+printf '\nSummary: %s/summary.csv\n' "$FULL"

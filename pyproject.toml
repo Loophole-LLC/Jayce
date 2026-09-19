@@ -1,0 +1,36 @@
+# Copyright (C) 2026 Loophole, LLC.
+# SPDX-License-Identifier: AGPL-3.0-only
+# See LICENSE.md in the repository root for terms and warranty information.
+
+[project]
+name = "jayce"
+version = "0.1.0"
+description = "Adaptive Prototype Memory learning from a local parent model"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE.md", "NOTICE.md"]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy==2.5.3",
+    "torch==2.14.0",
+    "transformers==4.51.0",
+    "accelerate==1.10.1",
+    "sentencepiece==0.2.1",
+    "huggingface-hub==0.36.2",
+    "llama-cpp-python==0.3.35",
+]
+
+[project.optional-dependencies]
+# Kept for compatibility with existing `uv run --extra gguf` commands.
+gguf = []
+
+[tool.uv]
+package = false
+
+# The Transformers backend uses CPU; Linux and Windows do not need CUDA downloads.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

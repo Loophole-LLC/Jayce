@@ -1,0 +1,55 @@
+{
+  "run_id": "run-20260921-101231",
+  "started_at": "2026-09-21T14:12:31.071698+00:00",
+  "command": "caffeinate -is ./benchmark/run-benchmark target/run-20260921-101231",
+  "java": "OpenJDK 26.0.1+8-34; javac --release 17; -Xmx2g",
+  "os": "27.0",
+  "logical_cpus": 6,
+  "scope": {
+    "streams": 4,
+    "budgets": 3,
+    "validation_seeds": 2,
+    "test_seeds": 10
+  },
+  "completed_at": "2026-09-21T14:19:19.656794+00:00",
+  "elapsed_seconds": 408.554,
+  "exit_code": 0,
+  "cpu": "Apple A18 Pro",
+  "memory_bytes": 8589934592,
+  "source_sha256": "4640ce0c175c276378f351070d532502d53a306d53cfb04cbd2a9bd1477f133a",
+  "interference_control": "One benchmark process; no model tests ran concurrently. Background desktop activity was not controlled.",
+  "verification": {
+    "row_counts": {
+      "validation.csv": 720,
+      "selected.csv": 24,
+      "final.csv": 240,
+      "summary.csv": 24,
+      "checkpoints.csv": 8640
+    },
+    "checks": [
+      "Recomputed summary accuracy, memory, work, paired intervals, and seed wins",
+      "Verified validation winners, test seed coverage, chosen settings, and memory ceilings",
+      "Verified Java source, source archive, selected settings, and all eight dataset checksums"
+    ],
+    "identical_to_previous_run": [
+      "validation.csv",
+      "selected.csv",
+      "summary.csv",
+      "checkpoints.csv"
+    ],
+    "final_csv_identical_excluding": [
+      "seconds"
+    ]
+  },
+  "log_format": "Machine-specific absolute paths in run.log were made repository-relative for publication.",
+  "artifact_sha256": {
+    "checkpoints.csv": "1126496579978dc01b89715b49649bc8ce8b753b18918437d6426740a4e93161",
+    "final.csv": "b3fa845842a572f2fed021bfc2fcd70dbc13a910dcd823f61386a22df59eee68",
+    "freeze.sha256": "d623805833ec1ab9928b153d25d45dc4fc146d173a922bd25f4f6a9982a7d7f5",
+    "run.log": "dcdf58c694241375fee835570d96ac176e56fea6db06503a09d07e1523d89ff1",
+    "selected.csv": "75cf41a191d38a234ab9eb1c53b5b32ed4539583363335194e0c5e470ef639fe",
+    "source.zip": "64f01931d5dc6b73d01ed50d581afa4b205d07eee83eeab5b962921e17b88a89",
+    "summary.csv": "86315ba3efbb94f4134f505c6c3b79d7782298a2e9ffb5bbb841204f998aabdd",
+    "validation.csv": "8784f5fb1ea10ba46c6d54b0fa3743268d37a1b6203b192c943928ac10511eb2"
+  }
+}

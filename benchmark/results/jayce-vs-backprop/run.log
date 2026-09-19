@@ -1,0 +1,95 @@
+
+==> 1/4 Data: download if missing and verify checksums
+All MNIST and Fashion-MNIST archives are present and checksum-verified.
+    done in 0s
+
+==> 2/4 Smoke checks
+Backprop gradient check passed (maximum error 1.44e-11).
+jayce: fresh=16, work=1024, probability-sum=1.000000
+backprop: fresh=16, work=108240, probability-sum=1.000000
+    done in 2s
+
+==> 3/4 Tune on the validation seeds -> benchmark/target/run-20260921-101231
+Validation complete: shapes-permutations / examples / jayce
+Validation complete: shapes-permutations / examples / backprop
+Validation complete: shapes-permutations / work / jayce
+Validation complete: shapes-permutations / work / backprop
+Validation complete: shapes-permutations / memory / jayce
+Validation complete: shapes-permutations / memory / backprop
+Validation complete: shapes-mixed / examples / jayce
+Validation complete: shapes-mixed / examples / backprop
+Validation complete: shapes-mixed / work / jayce
+Validation complete: shapes-mixed / work / backprop
+Validation complete: shapes-mixed / memory / jayce
+Validation complete: shapes-mixed / memory / backprop
+Validation complete: mnist-rotations / examples / jayce
+Validation complete: mnist-rotations / examples / backprop
+Validation complete: mnist-rotations / work / jayce
+Validation complete: mnist-rotations / work / backprop
+Validation complete: mnist-rotations / memory / jayce
+Validation complete: mnist-rotations / memory / backprop
+Validation complete: fashion-rotations / examples / jayce
+Validation complete: fashion-rotations / examples / backprop
+Validation complete: fashion-rotations / work / jayce
+Validation complete: fashion-rotations / work / backprop
+Validation complete: fashion-rotations / memory / jayce
+Validation complete: fashion-rotations / memory / backprop
+Validation choices frozen in target/run-20260921-101231/selected.csv
+    done in 70s
+
+==> 4/4 Test on the held-out seeds -> benchmark/target/run-20260921-101231
+Held-out test complete: shapes-permutations / seed 2280101
+Held-out test complete: shapes-permutations / seed 2384830
+Held-out test complete: shapes-permutations / seed 2489559
+Held-out test complete: shapes-permutations / seed 2594288
+Held-out test complete: shapes-permutations / seed 2699017
+Held-out test complete: shapes-permutations / seed 2803746
+Held-out test complete: shapes-permutations / seed 2908475
+Held-out test complete: shapes-permutations / seed 3013204
+Held-out test complete: shapes-permutations / seed 3117933
+Held-out test complete: shapes-permutations / seed 3222662
+Held-out test complete: shapes-mixed / seed 2280101
+Held-out test complete: shapes-mixed / seed 2384830
+Held-out test complete: shapes-mixed / seed 2489559
+Held-out test complete: shapes-mixed / seed 2594288
+Held-out test complete: shapes-mixed / seed 2699017
+Held-out test complete: shapes-mixed / seed 2803746
+Held-out test complete: shapes-mixed / seed 2908475
+Held-out test complete: shapes-mixed / seed 3013204
+Held-out test complete: shapes-mixed / seed 3117933
+Held-out test complete: shapes-mixed / seed 3222662
+Held-out test complete: mnist-rotations / seed 2280101
+Held-out test complete: mnist-rotations / seed 2384830
+Held-out test complete: mnist-rotations / seed 2489559
+Held-out test complete: mnist-rotations / seed 2594288
+Held-out test complete: mnist-rotations / seed 2699017
+Held-out test complete: mnist-rotations / seed 2803746
+Held-out test complete: mnist-rotations / seed 2908475
+Held-out test complete: mnist-rotations / seed 3013204
+Held-out test complete: mnist-rotations / seed 3117933
+Held-out test complete: mnist-rotations / seed 3222662
+Held-out test complete: fashion-rotations / seed 2280101
+Held-out test complete: fashion-rotations / seed 2384830
+Held-out test complete: fashion-rotations / seed 2489559
+Held-out test complete: fashion-rotations / seed 2594288
+Held-out test complete: fashion-rotations / seed 2699017
+Held-out test complete: fashion-rotations / seed 2803746
+Held-out test complete: fashion-rotations / seed 2908475
+Held-out test complete: fashion-rotations / seed 3013204
+Held-out test complete: fashion-rotations / seed 3117933
+Held-out test complete: fashion-rotations / seed 3222662
+Java benchmark results written to benchmark/target/run-20260921-101231
+    done in 336s
+
+Finished in 408s. Results in benchmark/target/run-20260921-101231:
+checkpoints.csv
+final.csv
+freeze.sha256
+run-metadata.json
+run.log
+selected.csv
+source.zip
+summary.csv
+validation.csv
+
+Summary: benchmark/target/run-20260921-101231/summary.csv

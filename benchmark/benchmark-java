@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Copyright (C) 2026 Loophole, LLC.
+# SPDX-License-Identifier: AGPL-3.0-only
+# See LICENSE.md in the repository root for terms and warranty information.
+
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "$0")" && pwd)"
+# The benchmark reads data/ and hashes reference/java relative to the working directory,
+# so always run from this folder, wherever the command was started.
+cd "$ROOT"
+source "$ROOT/scripts/require_java.sh"
+require_java
+CLASSES="$ROOT/target/java-benchmark-classes"
+rm -rf "$CLASSES"
+mkdir -p "$CLASSES"
+find "$ROOT/reference/java" -name '*.java' -print0 | xargs -0 javac --release 17 -d "$CLASSES"
+
+if [[ "${1:-}" == "smoke" ]]; then
+  java -cp "$CLASSES" company.loophole.jayce.backprop.BackpropGradientCheck
+  exec java -Djava.awt.headless=true -cp "$CLASSES" company.loophole.jayce.intervention.HardBenchmark smoke
+fi
+
+exec java -Xmx2g -Djava.awt.headless=true -cp "$CLASSES" \
+  company.loophole.jayce.intervention.HardBenchmark "$@"
