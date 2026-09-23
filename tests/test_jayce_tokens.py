@@ -2,11 +2,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See LICENSE.md in the repository root for terms and warranty information.
 
-import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,10 +14,8 @@ from jayce_tokens import (
     END,
     PrototypeError,
     PrototypeResponder,
-    Reply,
     TokenMemory,
     answer_context,
-    read_examples,
 )
 
 
@@ -132,6 +128,25 @@ class TokenMemoryTests(unittest.TestCase):
                 memory.save(str(path), "model-A")
             self.assertEqual(path.read_bytes(), previous)
             self.assertEqual(list(Path(folder).iterdir()), [path])
+
+    def test_only_trainer_saves_can_replace_a_training_checkpoint(self):
+        memory = TokenMemory()
+        memory.learn([np.array([1.0, 0.0])], [3])
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / "prototypes.npz")
+            memory.save(path, "model-A", training_state={"cursor": 1})
+            restored = TokenMemory.load(path, "model-A", 256)
+            before = Path(path).read_bytes()
+            # Covers both a loaded reader and /reset-jayce's fresh memory object.
+            for writer in (restored, TokenMemory()):
+                with self.assertRaisesRegex(PrototypeError, "read-only"):
+                    writer.save(path, "model-A")
+                self.assertEqual(Path(path).read_bytes(), before)
+            restored.save(path, "model-A", training_state={"cursor": 2})
+            with np.load(path, allow_pickle=False) as data:
+                self.assertEqual(json.loads(str(data["metadata"].item()))["training_state"], {"cursor": 2})
+            # A separate export remains available without changing the trainer.
+            restored.save(str(Path(folder) / "export.npz"), "model-A")
 
     def test_invalid_saved_arrays_are_rejected(self):
         memory = TokenMemory()
@@ -340,286 +355,3 @@ class ResponderTests(unittest.TestCase):
         self.assertEqual(
             self.responder.reply(answer_context("What is the code?")).text, "42"
         )
-
-    def test_bad_training_file_reports_line_before_learning(self):
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "examples.jsonl"
-            path.write_text('{"question":"Q","answer":"A"}\n{"question":"bad"}\n')
-            with self.assertRaisesRegex(PrototypeError, "line 2"):
-                read_examples(str(path))
-
-
-class ChatTests(unittest.TestCase):
-    def test_default_memory_separates_parents_and_transformers_precision(self):
-        import jayce
-
-        with patch.dict("os.environ", {"JAYCE_DTYPE": "float32"}):
-            transformers_file = jayce.default_prototype_file("example/parent")
-            gguf_file = jayce.default_prototype_file(jayce.PARENT_MODEL)
-            self.assertEqual(gguf_file, jayce.default_prototype_file(jayce.PARENT_MODEL))
-            self.assertNotEqual(transformers_file, gguf_file)
-            self.assertNotEqual(Path(gguf_file).name, "jayce-prototypes.npz")
-        with patch.dict("os.environ", {"JAYCE_DTYPE": "float16"}):
-            self.assertNotEqual(
-                transformers_file, jayce.default_prototype_file("example/parent")
-            )
-            # This environment variable changes Transformers only, not GGUF weights.
-            self.assertEqual(gguf_file, jayce.default_prototype_file(jayce.PARENT_MODEL))
-
-    def test_cli_selects_model_memory_unless_an_explicit_file_is_given(self):
-        import jayce
-
-        for model in (jayce.PARENT_MODEL, "example/parent"):
-            for explicit in (None, "my-prototypes.npz"):
-                with self.subTest(model=model, explicit=explicit):
-                    argv = ["jayce", "--prompt", "Hello", "--model", model]
-                    if explicit:
-                        argv.extend(["--prototype-file", explicit])
-                    with patch("sys.argv", argv), patch("jayce.ChatSession") as session:
-                        jayce.main()
-                    self.assertEqual(
-                        session.call_args.kwargs["prototype_file"],
-                        explicit or jayce.default_prototype_file(model),
-                    )
-
-    def test_both_cli_modes_learn_and_save_through_the_same_flow(self):
-        import jayce
-
-        def generate(*args, on_token=None, on_finished=None):
-            on_token("B")
-            on_finished(True)
-            return "B"
-
-        question = "What is this letter 'B'?"
-        for prompt_args in ([], ["--prompt", question]):
-            model = "example/OverrideModel" if prompt_args else "example/DefaultModel"
-            with (
-                self.subTest(prompt_args=prompt_args),
-                tempfile.TemporaryDirectory() as folder,
-            ):
-                encoder = FakeEncoder()
-                prototypes = str(Path(folder) / "prototypes.npz")
-                argv = [
-                    "jayce",
-                    *(["--model", model] if prompt_args else []),
-                    "--prototype-file",
-                    prototypes,
-                    *prompt_args,
-                ]
-                output = io.StringIO()
-                with (
-                    patch("sys.argv", argv),
-                    patch("jayce.PARENT_MODEL", "example/DefaultModel"),
-                    patch("jayce.load_model", return_value=(None, object())) as loader,
-                    patch("jayce.ContextEncoder", return_value=encoder),
-                    patch("jayce.generate_chat", side_effect=generate),
-                    patch("builtins.input", side_effect=[question, "/quit"]),
-                    redirect_stdout(output),
-                ):
-                    jayce.main()
-                loader.assert_called_once_with(model)
-                restored = TokenMemory.load(
-                    prototypes, encoder.identity, encoder.vocab_size
-                )
-                self.assertEqual(
-                    PrototypeResponder(encoder, restored)
-                    .reply(answer_context(question))
-                    .text,
-                    "B",
-                )
-                self.assertEqual(restored.teacher_examples, 1)
-                self.assertIn(
-                    f"Jayce> Jayce don't know\nParent ({model})> B",
-                    output.getvalue(),
-                )
-                self.assertIn("Jayce (after learning)> B", output.getvalue())
-
-    def test_failed_parent_turn_does_not_learn_or_enter_history(self):
-        import jayce
-
-        responder = PrototypeResponder(FakeEncoder())
-        with (
-            patch("jayce.load_model", return_value=(None, object())),
-            patch("jayce.prepare_responder", return_value=responder),
-            patch("jayce.generate_chat", side_effect=RuntimeError("generation failed")),
-            redirect_stdout(io.StringIO()),
-        ):
-            session = jayce.ChatSession("ExampleModel")
-            session.answer("Question?")
-        self.assertEqual(session.history, [])
-        self.assertEqual(responder.memory.examples, 0)
-
-    def test_import_saves_completed_examples_if_a_later_example_fails(self):
-        from jayce import learn_examples
-
-        encoder = FakeEncoder()
-        responder = PrototypeResponder(encoder, TokenMemory(max_prototypes=2))
-        with tempfile.TemporaryDirectory() as folder:
-            path = str(Path(folder) / "prototypes.npz")
-            with self.assertRaises(PrototypeError):
-                learn_examples(
-                    responder, [("First question", "A"), ("Second question", "B")], path
-                )
-            restored = TokenMemory.load(path, encoder.identity, encoder.vocab_size)
-            self.assertEqual(restored.examples, 1)
-            self.assertEqual(
-                PrototypeResponder(encoder, restored)
-                .reply(answer_context("First question"))
-                .text,
-                "A",
-            )
-
-    def test_weak_match_is_withheld_then_parent_answer_is_learned_and_remembered(self):
-        import jayce
-
-        responder = PrototypeResponder(FakeEncoder())
-        responder.teach(answer_context("A different question"), "A")
-        output = io.StringIO()
-        examples_when_parent_answers = []
-
-        def generate(*args, on_token=None, on_finished=None):
-            examples_when_parent_answers.append(responder.memory.examples)
-            on_token("B")
-            on_finished(True)
-            return "B"
-
-        question = "What is this letter 'B'?"
-        with (
-            patch("jayce.load_model", return_value=(None, object())),
-            patch("jayce.prepare_responder", return_value=responder),
-            patch("jayce.generate_chat", side_effect=generate),
-            patch("builtins.input", side_effect=[question, question, "/quit"]),
-            redirect_stdout(output),
-        ):
-            jayce.chat(
-                jayce.ChatSession(
-                    "example/parent",
-                    max_new_tokens=16,
-                    history_turns=2,
-                )
-            )
-        text = output.getvalue()
-        self.assertIn("Jayce> Jayce don't know\nParent (example/parent)> B", text)
-        self.assertNotIn("Jayce> A", text)
-        self.assertNotIn("Jayce (guess)", text)
-        self.assertIn("Parent teaches Jayce", text)
-        self.assertIn("Jayce (after learning)> B", text)
-        self.assertIn("Jayce> B\nParent (example/parent)> B", text)
-        self.assertIn("Parent confirms", text)
-        self.assertEqual(examples_when_parent_answers, [1, 2])
-        self.assertEqual(responder.memory.teacher_examples, 1)
-
-    def test_model_always_called_and_jayce_predicts_before_current_answer(self):
-        import jayce
-
-        responder = PrototypeResponder(FakeEncoder())
-        calls = []
-
-        def generate(
-            tokenizer,
-            model,
-            history,
-            question,
-            limit,
-            name,
-            on_token=None,
-            on_finished=None,
-        ):
-            calls.append((question, len(history)))
-            answer = ["A", "B", "C"][len(calls) - 1]
-            on_token(answer)
-            on_finished(True)
-            return answer
-
-        inputs = [
-            "Question?",
-            "/clear",
-            "Question?",
-            "/learning off",
-            "/clear",
-            "Question?",
-            "/quit",
-        ]
-        output = io.StringIO()
-        with (
-            patch("jayce.load_model", return_value=(None, object())),
-            patch("jayce.prepare_responder", return_value=responder),
-            patch("jayce.generate_chat", side_effect=generate),
-            patch("builtins.input", side_effect=inputs),
-            redirect_stdout(output),
-        ):
-            jayce.chat(
-                jayce.ChatSession(
-                    "ExampleModel",
-                    max_new_tokens=16,
-                    history_turns=2,
-                )
-            )
-        self.assertEqual(len(calls), 3)
-        self.assertEqual(responder.memory.examples, 2)
-        text = output.getvalue()
-        self.assertIn("Parent (ExampleModel)> A", text)
-        self.assertIn("Jayce> Jayce don't know", text)
-        self.assertIn("Jayce> A\nParent (ExampleModel)> B", text)
-        self.assertIn("Parent correction", text)
-        self.assertIn("Jayce (correction)> B", text)
-        self.assertIn("Jayce> B", text)
-        self.assertIn("Parent (ExampleModel)> C", text)
-
-    def test_no_learning_for_truncation_or_disabled_learning(self):
-        from jayce import teach_completed_answer
-
-        responder = PrototypeResponder(FakeEncoder())
-        with redirect_stdout(io.StringIO()):
-            teach_completed_answer(responder, "Q", "A", False, True, None)
-            teach_completed_answer(responder, "Q", "A", True, False, None)
-        self.assertEqual(len(responder.memory), 0)
-
-    def test_prototype_failure_leaves_model_path_available(self):
-        from jayce import try_prototype_reply
-
-        responder = PrototypeResponder(FakeEncoder())
-        with patch.object(
-            responder, "reply", side_effect=RuntimeError("model has no vectors")
-        ):
-            result = try_prototype_reply(responder, "Q", 10)
-        self.assertIsNone(result.text)
-        self.assertIn("model has no vectors", result.reason)
-
-    def test_parent_agreement_is_visible_and_does_not_train_or_retry(self):
-        from jayce import teach_completed_answer
-
-        responder = PrototypeResponder(FakeEncoder())
-        output = io.StringIO()
-        with (
-            patch.object(responder, "teach") as teach,
-            patch.object(responder, "reply") as reply,
-            redirect_stdout(output),
-        ):
-            teach_completed_answer(
-                responder, "Q", "B", True, True, None, Reply("B", "matched")
-            )
-        teach.assert_not_called()
-        reply.assert_not_called()
-        self.assertIn("Parent confirms", output.getvalue())
-
-    def test_correction_retries_through_prototypes_instead_of_echoing_parent(self):
-        from jayce import teach_completed_answer
-
-        responder = PrototypeResponder(FakeEncoder())
-        output = io.StringIO()
-        with (
-            patch.object(responder, "reply", return_value=Reply(None, "weak match")),
-            redirect_stdout(output),
-        ):
-            teach_completed_answer(
-                responder, "Q", "B", True, True, None, Reply("A", "matched")
-            )
-        text = output.getvalue()
-        self.assertIn("Parent correction", text)
-        self.assertIn("Jayce (correction)> Jayce don't know", text)
-        self.assertNotIn("Jayce (correction)> B", text)
-
-
-if __name__ == "__main__":
-    unittest.main()

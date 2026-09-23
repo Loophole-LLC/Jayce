@@ -13,14 +13,52 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from jayce_model import (
-    ContextEncoder,
     ModelUnavailable,
     _available_memory,
     _total_memory,
+    chat_prompt_token_count,
     load_model,
 )
 
 GIB = 2**30
+
+
+class ChatPromptSizeTests(unittest.TestCase):
+    def test_transformers_counts_the_generation_template(self):
+        tokenizer = Mock()
+        tokenizer.apply_chat_template.return_value = [1, 2, 3, 4]
+        self.assertEqual(chat_prompt_token_count(tokenizer, None, "Question", "System"), 4)
+        tokenizer.apply_chat_template.assert_called_once_with(
+            [{"role": "system", "content": "System"}, {"role": "user", "content": "Question"}],
+            tokenize=True, add_generation_prompt=True, enable_thinking=False,
+        )
+
+    def test_gguf_counts_selected_formatter_without_inference(self):
+        from llama_cpp.llama_chat_format import Jinja2ChatFormatter
+
+        formatter = Jinja2ChatFormatter(
+            template="{{ bos_token }}{% for message in messages %}<{{ message.role }}>{{ message.content }}{% endfor %}<assistant>",
+            bos_token="<bos>", eos_token="<eos>",
+        )
+        model = SimpleNamespace(
+            chat_handler=None, chat_format="chat_template.default",
+            _chat_handlers={"chat_template.default": formatter.to_chat_handler()},
+            tokenize=Mock(side_effect=lambda value, **kwargs: list(value)),
+            create_completion=Mock(side_effect=AssertionError("No inference while counting")),
+        )
+        count = chat_prompt_token_count(None, model, "Question", "System")
+        self.assertEqual(count, len(b"<bos><system>System<user>Question<assistant>"))
+        self.assertTrue(model.tokenize.call_args.kwargs["special"])
+        model.create_completion.assert_not_called()
+
+    def test_gguf_registered_fallback_formatter_is_counted(self):
+        model = SimpleNamespace(
+            chat_handler=None, chat_format="chatml", _chat_handlers={},
+            tokenize=Mock(side_effect=lambda value, **kwargs: list(value)),
+        )
+        count = chat_prompt_token_count(None, model, "Question", "System")
+        self.assertGreater(count, len("QuestionSystem"))
+        self.assertIn(b"assistant", model.tokenize.call_args.args[0])
 
 
 def denied(status):
@@ -106,7 +144,6 @@ class GGUFLoadingTests(unittest.TestCase):
         self.enterContext(patch.dict("sys.modules", {
             "llama_cpp": SimpleNamespace(Llama=self.llama, LLAMA_POOLING_TYPE_NONE=0)
         }))
-        self.enterContext(patch("jayce_model._filter_expected_embedding_warning"))
         # Unknown memory never blocks a load; the memory tests set their own values.
         self.enterContext(patch("jayce_model._available_memory", return_value=None))
         self.enterContext(patch("jayce_model._total_memory", return_value=None))
@@ -121,7 +158,7 @@ class GGUFLoadingTests(unittest.TestCase):
         ))
         self.enterContext(redirect_stdout(io.StringIO()))
 
-    def test_remote_gguf_downloads_anonymously_and_loads_embeddings(self):
+    def test_remote_gguf_downloads_anonymously_for_generation(self):
         tokenizer, model = load_model(self.source)
         self.assertIsNone(tokenizer)
         self.assertIs(model, self.llama.return_value)
@@ -130,8 +167,8 @@ class GGUFLoadingTests(unittest.TestCase):
         )
         self.saved_token.assert_not_called()
         self.assertEqual(self.llama.call_args.kwargs["model_path"], str(self.path))
-        self.assertTrue(self.llama.call_args.kwargs["embedding"])
-        self.assertEqual(self.llama.call_args.kwargs["pooling_type"], 0)
+        self.assertFalse(self.llama.call_args.kwargs.get("embedding", False))
+        self.assertNotIn("pooling_type", self.llama.call_args.kwargs)
 
     def test_cached_gguf_needs_no_network_or_login(self):
         self.cached.return_value = str(self.path)
@@ -139,6 +176,23 @@ class GGUFLoadingTests(unittest.TestCase):
             load_model(self.source)
         self.download.assert_not_called()
         self.saved_token.assert_not_called()
+
+    def test_cpu_mode_disables_both_weight_and_attention_gpu_offload(self):
+        with patch.dict("os.environ", {"JAYCE_CPU": "1"}):
+            load_model(str(self.path))
+        options = self.llama.call_args.kwargs
+        self.assertEqual(options["n_gpu_layers"], 0)
+        self.assertFalse(options["offload_kqv"])
+        self.assertEqual((options["n_batch"], options["n_ubatch"]), (128, 128))
+        self.assertFalse(options.get("embedding", False))
+
+    def test_default_mode_keeps_gpu_offload_with_bounded_batches(self):
+        with patch.dict("os.environ", {"JAYCE_CPU": "0"}):
+            load_model(str(self.path))
+        options = self.llama.call_args.kwargs
+        self.assertEqual(options["n_gpu_layers"], -1)
+        self.assertTrue(options["offload_kqv"])
+        self.assertEqual((options["n_batch"], options["n_ubatch"]), (128, 128))
 
     def test_local_gguf_needs_no_hub_lookup(self):
         load_model(str(self.path))
@@ -163,12 +217,6 @@ class GGUFLoadingTests(unittest.TestCase):
                 load_model(source)
         self.download.assert_not_called()
 
-    def test_remote_memory_identity_includes_actual_weights(self):
-        tokenizer, model = load_model(self.source)
-        original = ContextEncoder(tokenizer, model, self.source).identity
-        self.assertEqual(original, ContextEncoder(tokenizer, model, self.source).identity)
-        self.path.write_bytes(b"different model weights")
-        self.assertNotEqual(original, ContextEncoder(tokenizer, model, self.source).identity)
 
     def test_too_little_free_memory_stops_before_loading(self):
         with patch("jayce_model._available_memory", return_value=1 * GIB):

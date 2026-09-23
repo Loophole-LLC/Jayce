@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See LICENSE.md in the repository root for terms and warranty information.
 
-"""Local model backends: loading, parent answers, and frozen context vectors.
+"""Local model backends: loading and parent answers.
 
 All Transformers and llama.cpp details live here. The APM learning rules are in
 jayce_tokens.py and depend only on NumPy.
@@ -10,43 +10,25 @@ jayce_tokens.py and depend only on NumPy.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import threading
 from collections.abc import Callable
 from pathlib import Path
 
 import huggingface_hub
-import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from jayce_tokens import CONTEXT_FORMAT, PrototypeError, unit
-
-_LLAMA_LOG_FILTER = None
-_EMBEDDING_WARNING = b"embeddings required but some input tokens were not marked as outputs -> overriding"
+from jayce_tokens import PrototypeError
 
 
-def _filter_expected_embedding_warning() -> None:
-    """Hide a known harmless warning from the local model library."""
-    global _LLAMA_LOG_FILTER
-    if _LLAMA_LOG_FILTER is not None:
-        return
-
-    import ctypes
-
-    import llama_cpp
-    from llama_cpp._logger import llama_log_callback as default_callback
-
-    @llama_cpp.llama_log_callback
-    def callback(level, message, user_data):
-        if message and _EMBEDDING_WARNING in message:
-            return
-        default_callback(level, message, user_data)
-
-    _LLAMA_LOG_FILTER = callback
-    llama_cpp.llama_log_set(callback, ctypes.c_void_p(0))
+_SYSTEM_MESSAGE = (
+    "Answer the user accurately and briefly. If you are uncertain, say so. "
+    "For identification questions, reply with only the identified item. "
+    "If asked to identify a quoted letter, return only that letter. "
+    "JAYCE stands for Jayce Associates Your Categorized Exemplars. "
+    "APM stands for Adaptive Prototype Memory."
+)
 
 
 class ModelUnavailable(RuntimeError):
@@ -172,7 +154,7 @@ def _require_free_memory(path: str) -> None:
             f"This model needs about {(needed + _SYSTEM_MEMORY) / _GIB:.1f} GiB of "
             f"memory, including room for the system, but this computer has only "
             f"{total / _GIB:.1f} GiB. Running out of memory can freeze a computer, so "
-            "Jayce stopped before loading it. Choose a smaller model with --model, or "
+            "Jayce stopped before loading it. Choose a smaller model in jayce_config.py, or "
             "set JAYCE_SKIP_MEMORY_CHECK=1 to try anyway."
         )
     available = _available_memory()
@@ -194,23 +176,27 @@ def load_model(path: str):
         if not Path(path).is_file():
             raise ModelUnavailable(f"GGUF file not found: {path}")
         try:
-            from llama_cpp import LLAMA_POOLING_TYPE_NONE, Llama
+            from llama_cpp import Llama
         except ImportError as error:
             raise ModelUnavailable(
                 "GGUF models need llama-cpp-python, which is not installed. "
-                "Run `uv sync --locked` to install the project dependencies. "
+                "Run `uv sync --locked --extra parent` to install the project dependencies. "
                 "Building llama-cpp-python requires C++ build tools."
             ) from error
 
         _require_free_memory(path)
-        _filter_expected_embedding_warning()
+        cpu_only = os.environ.get("JAYCE_CPU") == "1"
+        if cpu_only:
+            print("Running the GGUF model on CPU (JAYCE_CPU=1).", flush=True)
         model = Llama(
             model_path=path,
             n_ctx=4096,
             n_threads=max(4, os.cpu_count() or 4),
-            n_gpu_layers=-1,
-            embedding=True,
-            pooling_type=LLAMA_POOLING_TYPE_NONE,
+            # Bound output scratch buffers on machines with 8 GiB RAM.
+            n_batch=128,
+            n_ubatch=128,
+            n_gpu_layers=0 if cpu_only else -1,
+            offload_kqv=not cpu_only,
             # Use the model's own chat template rather than forcing a different format.
             chat_format=None,
             verbose=False,
@@ -248,20 +234,49 @@ def load_model(path: str):
     return tokenizer, model
 
 
-def model_label(model_name: str) -> str:
-    """Show a GGUF filename without its extension; keep model IDs intact."""
-    path = Path(model_name)
-    return path.stem if path.suffix.lower() == ".gguf" else model_name
+def chat_prompt_token_count(tokenizer, model, question: str, system_message: str) -> int:
+    """Count the actual chat template without evaluating the model."""
+    messages = [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": question},
+    ]
+    if tokenizer is not None:
+        return len(tokenizer.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True, enable_thinking=False,
+        ))
 
+    from llama_cpp.llama_chat_format import get_chat_completion_handler
 
-def _system_message() -> str:
-    return (
-        "Answer the user accurately and briefly. If you are uncertain, say so. "
-        "For identification questions, reply with only the identified item. "
-        "If asked to identify a quoted letter, return only that letter. "
-        "JAYCE stands for Jayce Associates Your Categorized Exemplars. "
-        "APM stands for Adaptive Prototype Memory."
+    # Use exactly the handler selected by Llama.create_chat_completion, including
+    # its BOS/special-token rules. Stop at the completion boundary, before inference.
+    handler = (
+        model.chat_handler or model._chat_handlers.get(model.chat_format)
+        or get_chat_completion_handler(model.chat_format)
     )
+
+    class PromptCount(Exception):
+        pass
+
+    class PromptProbe:
+        verbose = False
+
+        def tokenize(self, *args, **kwargs):
+            return model.tokenize(*args, **kwargs)
+
+        def create_completion(self, prompt, **kwargs):
+            tokens = (
+                model.tokenize(prompt.encode("utf-8"), add_bos=True, special=True)
+                if isinstance(prompt, str) else prompt
+            )
+            raise PromptCount(len(tokens))
+
+    try:
+        handler(llama=PromptProbe(), messages=messages, stream=False, max_tokens=1)
+    except PromptCount as result:
+        return result.args[0]
+    except AttributeError as error:
+        raise PrototypeError("Cannot measure the configured GGUF chat template.") from error
+    raise PrototypeError("The GGUF chat handler did not expose a text prompt.")
 
 
 def generate_chat(
@@ -270,13 +285,12 @@ def generate_chat(
     history: list[dict[str, str]],
     question: str,
     max_new_tokens: int,
-    model_name: str,
     on_token: Callable[[str], None] | None = None,
     on_finished: Callable[[bool], None] | None = None,
+    system_message: str | None = None,
 ) -> str:
-    system_message = _system_message()
     messages = [
-        {"role": "system", "content": system_message},
+        {"role": "system", "content": system_message or _SYSTEM_MESSAGE},
         *history,
         {"role": "user", "content": question},
     ]
@@ -378,111 +392,3 @@ def generate_chat(
     if on_finished:
         on_finished(bool(completed and completed[0]))
     return "".join(pieces).strip()
-
-
-class ContextEncoder:
-    """Read final-layer context vectors from Transformers or llama.cpp.
-
-    Both paths use causal attention, retaining a cache while APM selects tokens.
-    No sampling, generation call, or output-logit selection occurs here.
-    """
-
-    def __init__(self, tokenizer, model, model_name: str) -> None:
-        self.tokenizer, self.model = tokenizer, model
-        self.past = None
-        self.used = 0
-        self.backend = "llama.cpp" if tokenizer is None else "transformers"
-        if tokenizer is None:
-            self.vocab_size = model.n_vocab()
-            self.context_limit = model.n_ctx()
-        else:
-            self.vocab_size = len(tokenizer)
-            self.context_limit = int(
-                getattr(model.config, "max_position_embeddings", 4096)
-            )
-        signature = {
-            "format": CONTEXT_FORMAT,
-            "backend": self.backend,
-            "model": model_name,
-            "vocabulary": self.vocab_size,
-        }
-        if tokenizer is not None:
-            signature["precision"] = str(model.dtype)
-            signature["tokenizer"] = hashlib.sha256(
-                json.dumps(tokenizer.get_vocab(), sort_keys=True).encode()
-            ).hexdigest()
-        # A remote GGUF's identity must include the downloaded weights too.
-        path = Path(model.model_path if model_name.startswith("hf://") else model_name)
-        if path.is_file():
-            signature.update(
-                path=str(path.resolve()),
-                bytes=path.stat().st_size,
-                modified=path.stat().st_mtime_ns,
-            )
-        else:
-            signature["revision"] = getattr(
-                getattr(model, "config", None), "_commit_hash", None
-            )
-        self.identity = hashlib.sha256(
-            json.dumps(signature, sort_keys=True).encode()
-        ).hexdigest()
-
-    def encode(self, text: str, *, prefix: bool = False) -> list[int]:
-        if self.tokenizer is None:
-            return self.model.tokenize(
-                text.encode("utf-8"), add_bos=prefix, special=False
-            )
-        return self.tokenizer.encode(text, add_special_tokens=prefix)
-
-    def decode(self, tokens: list[int]) -> str:
-        if self.tokenizer is None:
-            return self.model.detokenize(tokens, special=False).decode(
-                "utf-8", errors="replace"
-            )
-        return self.tokenizer.decode(tokens, skip_special_tokens=True)
-
-    def start(self, tokens: list[int]) -> np.ndarray:
-        self.close()
-        return self._evaluate(tokens)
-
-    def advance(self, token: int) -> np.ndarray:
-        return self._evaluate([token])
-
-    def _evaluate(self, tokens: list[int]) -> np.ndarray:
-        if not tokens or self.used + len(tokens) > self.context_limit:
-            raise PrototypeError(
-                "Question and answer exceed the model's context window."
-            )
-        if self.tokenizer is None:
-            import llama_cpp
-
-            if self.model.pooling_type() != llama_cpp.LLAMA_POOLING_TYPE_NONE:
-                raise PrototypeError(
-                    "Jayce needs token-level embeddings (pooling NONE)."
-                )
-            self.model.eval(tokens)
-            pointer = self.model._ctx.get_embeddings_ith(-1)
-            if not pointer:
-                raise PrototypeError(
-                    "This model did not expose a final-token context vector."
-                )
-            vector = np.ctypeslib.as_array(pointer, shape=(self.model.n_embd(),)).copy()
-        else:
-            device = next(self.model.parameters()).device
-            with torch.inference_mode():
-                output = self.model.base_model(
-                    input_ids=torch.tensor([tokens], dtype=torch.long, device=device),
-                    past_key_values=self.past,
-                    use_cache=True,
-                    return_dict=True,
-                )
-            self.past = output.past_key_values
-            vector = output.last_hidden_state[0, -1].float().cpu().numpy().copy()
-        self.used += len(tokens)
-        return unit(vector)
-
-    def close(self) -> None:
-        self.past = None
-        self.used = 0
-        if self.tokenizer is None:
-            self.model.reset()

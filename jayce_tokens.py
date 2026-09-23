@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See LICENSE.md in the repository root for terms and warranty information.
 
-"""APM next-token prediction over a frozen language model's context vectors.
+"""APM next-token prediction over native or frozen-model context vectors.
 
 The encoder computes features only. Every output token, including the decision
 to end an answer, is selected by prototype distance, without model logits.
@@ -23,13 +23,19 @@ import numpy as np
 END = -1  # A learned end-of-answer label, independent of a model's EOS IDs.
 FORMAT = "jayce-next-token-v3"
 # Storage changes must not invalidate context vectors already learned by a model.
-CONTEXT_FORMAT = "jayce-next-token-v2"
 # Allow small floating-point differences in the same context.
 EXACT_SIMILARITY = 1 - 1e-6
+DEFAULT_CAPACITY = 4096
+DEFAULT_MIN_SIMILARITY = 0.985
+DEFAULT_MIN_MARGIN = 0.005
 
 
 class PrototypeError(ValueError):
     """An example, encoder, or saved prototype file cannot be used."""
+
+
+class MemoryFull(PrototypeError):
+    """A complete lesson needs more prototype slots than are available."""
 
 
 def unit(vector: np.ndarray) -> np.ndarray:
@@ -71,7 +77,9 @@ class TokenMemory:
     A full pool rejects new contexts instead of silently forgetting old answers.
     """
 
-    def __init__(self, rate: float = 0.1, max_prototypes: int = 4096) -> None:
+    def __init__(self, rate: float = 0.1, max_prototypes: int = DEFAULT_CAPACITY) -> None:
+        # Atomic learning holds about three copies of the vectors at peak.
+        # At 2,560 float32 dimensions, the default uses ~40 MiB stored/~120 MiB peak.
         if not 0 < rate <= 1 or not math.isfinite(rate):
             raise PrototypeError("Prototype update rate must be in (0, 1].")
         if max_prototypes < 1:
@@ -86,6 +94,14 @@ class TokenMemory:
 
     def __len__(self) -> int:
         return len(self.labels)
+
+    def checkpoint_arrays(self) -> dict:
+        return {"vectors": self.vectors, "labels": self.labels, "counts": self.counts}
+
+    def restore_arrays(self, data) -> None:
+        self.vectors = np.asarray(data["vectors"], dtype=np.float32)
+        self.labels = data["labels"].copy()
+        self.counts = data["counts"].copy()
 
     def learn(
         self,
@@ -137,9 +153,9 @@ class TokenMemory:
             #    END has no special four-slot limit.
             if nearest is None or float(rows[nearest] @ vector) < EXACT_SIMILARITY:
                 if len(rows) >= self.max_prototypes:
-                    raise PrototypeError(
+                    raise MemoryFull(
                         "Jayce's prototype memory is full. This example was not saved; "
-                        "choose a new --prototype-file or use /reset-jayce."
+                        "increase capacity with ./jayce train --capacity N."
                     )
                 rows.append(vector.copy())
                 saved_labels.append(label)
@@ -161,7 +177,9 @@ class TokenMemory:
         self.teacher_examples += int(teacher)
 
     def match(
-        self, vector: np.ndarray, min_similarity: float, min_margin: float
+        self, vector: np.ndarray,
+        min_similarity: float = DEFAULT_MIN_SIMILARITY,
+        min_margin: float = DEFAULT_MIN_MARGIN,
     ) -> Match | None:
         """Find the nearest label and check that it is close enough and unambiguous."""
         if not len(self):
@@ -185,9 +203,19 @@ class TokenMemory:
         accepted = exact or (similarity >= min_similarity and margin >= min_margin)
         return Match(token, similarity, accepted)
 
-    def save(self, path: str, identity: str) -> None:
+    def save(self, path: str, identity: str, *, training_state: dict | None = None) -> None:
         """Replace the saved file only after the complete new file is on disk."""
         destination = Path(path)
+        if training_state is None and destination.exists():
+            # Inspect the destination, not just this object's loaded metadata:
+            # even a reset or an older chat snapshot must not overwrite a trainer.
+            with np.load(destination, allow_pickle=False) as data:
+                saved_metadata = json.loads(str(data["metadata"].item()))
+            if "training_state" in saved_metadata:
+                raise PrototypeError(
+                    "Trainer checkpoints are read-only outside their training loop. "
+                    "Resume the trainer to update this file, or save to a separate prototype file."
+                )
         destination.parent.mkdir(parents=True, exist_ok=True)
         metadata = json.dumps(
             {
@@ -197,6 +225,8 @@ class TokenMemory:
                 "max_prototypes": self.max_prototypes,
                 "examples": self.examples,
                 "teacher_examples": self.teacher_examples,
+                "algorithm": type(self).__name__,
+                **({"training_state": training_state} if training_state is not None else {}),
             }
         )
         temporary = None
@@ -211,9 +241,7 @@ class TokenMemory:
                 np.savez_compressed(
                     f,
                     metadata=np.asarray(metadata),
-                    vectors=self.vectors,
-                    labels=self.labels,
-                    counts=self.counts,
+                    **self.checkpoint_arrays(),
                 )
                 f.flush()
                 os.fsync(f.fileno())
@@ -234,15 +262,20 @@ class TokenMemory:
                 ):
                     raise PrototypeError(
                         "These prototypes use a different model, tokenizer, or encoder version. "
-                        "Choose a separate --prototype-file."
+                        "The saved memory has not been changed."
                     )
-                memory = cls(
+                algorithm = metadata.get("algorithm", "TokenMemory")
+                memory_type = TokenMemory
+                if algorithm == "PatternMemory":
+                    from jayce_patterns import PatternMemory
+                    memory_type = PatternMemory
+                elif algorithm != "TokenMemory":
+                    raise PrototypeError("Unknown prototype learning algorithm.")
+                memory = memory_type(
                     float(metadata["rate"]),
                     int(metadata["max_prototypes"]),
                 )
-                memory.vectors = np.asarray(data["vectors"], dtype=np.float32)
-                memory.labels = data["labels"].copy()
-                memory.counts = data["counts"].copy()
+                memory.restore_arrays(data)
                 memory.examples = int(metadata["examples"])
                 memory.teacher_examples = int(metadata["teacher_examples"])
                 memory._validate_saved_arrays(vocab_size)
@@ -277,7 +310,7 @@ class TokenMemory:
 
 
 class Encoder(Protocol):
-    """The small interface APM needs from a frozen model, or a test encoder."""
+    """The context-feature interface shared by native, model, and test encoders."""
 
     identity: str
     vocab_size: int
@@ -305,13 +338,15 @@ class PrototypeResponder:
         self,
         encoder: Encoder,
         memory: TokenMemory | None = None,
-        min_similarity: float = 0.985,
-        min_margin: float = 0.005,
+        min_similarity: float | None = None,
+        min_margin: float | None = None,
     ) -> None:
+        min_similarity = getattr(encoder, "min_similarity", DEFAULT_MIN_SIMILARITY) if min_similarity is None else min_similarity
+        min_margin = getattr(encoder, "min_margin", DEFAULT_MIN_MARGIN) if min_margin is None else min_margin
         if not 0 <= min_similarity <= 1 or not 0 <= min_margin <= 2:
             raise PrototypeError("Invalid prototype similarity or margin threshold.")
         self.encoder = encoder
-        self.memory = memory if memory is not None else TokenMemory()
+        self.memory = memory if memory is not None else getattr(encoder, "memory_factory", TokenMemory)()
         self.min_similarity = min_similarity
         self.min_margin = min_margin
 
@@ -385,27 +420,3 @@ class PrototypeResponder:
             return Reply(None, "no learned ending within the answer limit", len(tokens))
         finally:
             self.encoder.close()
-
-
-def read_examples(path: str) -> list[tuple[str, str]]:
-    """Read explicit question/answer pairs; never infer labels from file instructions."""
-    examples: list[tuple[str, str]] = []
-    for number, line in enumerate(
-        Path(path).read_text(encoding="utf-8").splitlines(), 1
-    ):
-        if not line.strip():
-            continue
-        try:
-            item = json.loads(line)
-            question, answer = item["question"], item["answer"]
-            if not isinstance(question, str) or not isinstance(answer, str):
-                raise TypeError("question and answer must be strings")
-            question, answer = question.strip(), answer.strip()
-            if not question or not answer:
-                raise ValueError("question and answer must be nonempty")
-            examples.append((question, answer))
-        except (ValueError, KeyError, TypeError) as error:
-            raise PrototypeError(f"{path}, line {number}: {error}") from error
-    if not examples:
-        raise PrototypeError("The training file has no question/answer examples.")
-    return examples

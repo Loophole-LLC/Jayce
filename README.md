@@ -18,13 +18,101 @@ saved for comparison—and can change as more examples arrive.
 - **[APM vs. backpropagation](#benchmark-results):** accuracy, training time, and memory comparisons.
 - **[Read the code](#read-the-code):** where to start and what each file does.
 
-## Quick start
+## Four commands
+
+| Command | Behavior |
+|---|---|
+| `./jayce` | Chat with the parent; learn and save automatically |
+| `./jayce --no-parent` | Chat using Jayce's saved memory alone |
+| `./jayce train` | Learn random lessons from the parent |
+| `./jayce train DATA` | Learn from a Parquet file or directory without a parent |
+
+All four use the same memory in `data/fineweb-edu/native/`: `lessons.npz` for answers
+and `prototypes.npz` for text. Changing modes does not change the learner.
+Chat learning and saving are on by default. Training saves automatically; **Ctrl+C**
+pauses it, and running the same command continues from saved progress.
+
+Type `/stats` for memory usage and `/quit` to exit. `/learning off` pauses automatic
+teaching in a parent chat.
+`./jayce --help` shows the four commands.
+
+### Capacity
+
+Capacity is the one optional training setting:
+
+```sh
+./jayce train --capacity 32768
+./jayce train data/fineweb-edu --capacity 32768
+```
+
+It limits **prototype slots, not lessons**, for that training run. An answer can use
+many slots. Adaptive Q&A memory also keeps at most that many question feature vectors,
+shared across answer positions. Existing memory is preserved; increase capacity to continue when full.
+Without the option, parent teaching can grow memory as needed up to 32,768 slots.
+New data-training memories start with 4,096 slots and retain their saved capacity.
+
+### Learning from the parent
+
+`./jayce train` downloads the topic names from Wikipedia's
+[Vital Articles Level 4](https://en.wikipedia.org/wiki/Wikipedia:Vital_articles/Level_4)
+catalog, covering roughly 10,000 subjects, including languages and calculus. It caches
+them in `data/fineweb-edu/native/topics.json` and reuses them offline. If the first
+download fails, it says so and uses the saved or starter topics. Remove only
+`topics.json` to download an updated catalog on the next parent training run.
+
+Jayce picks random topics from this catalog and asks Qwen for short factual lessons;
+it downloads topic names, not article text. For each fact, it asks Qwen for
+**1–5 different ways to ask the question**, with
+one consistent answer. Qwen is also asked to pair neighboring facts with similar questions
+and different answers, such as the capitals of France and Germany. These contrasts help
+APM keep similar-looking questions with different answers apart.
+Jayce learns each wording, so both “How many sides does a triangle
+have?” and “What is the number of sides in a triangle?” can recall the same answer.
+Repeated question wordings within a lesson are collapsed; familiar facts can still be
+practiced again in later lessons. Each learned wording is checked for recall and saved
+automatically. Related wordings can share prototypes; distinct contexts need new slots.
+No topic, lesson list, or manual teaching prompt is needed.
+
+It keeps going until you stop it, memory fills, or repeated attempts produce no usable
+examples. Repetition does not stop training. It preserves unfinished examples on
+restart. Qwen can make mistakes;
+verified recall means Jayce can replay the supplied answer, not that it is correct.
+
+### Learning from data
+
+```sh
+./jayce train data/fineweb-edu
+./jayce train /path/to/shard.parquet
+./jayce --no-parent
+```
+
+Directories are searched recursively for Parquet files with a `text` column. Quote paths
+containing spaces. Training learns text continuations directly, without loading Qwen.
+Enter an exact prefix from learned text to try recall; raw text does not automatically
+become question-and-answer knowledge. Resume with the same data source, or give another
+file to learn more while keeping the existing memory.
+
+Jayce is an experimental text-pattern learner. Q&A features share words, short ordered
+phrases, and spelling patterns across questions. This supports some unfamiliar wordings,
+but does not supply general semantic understanding or mathematical rules. Unfamiliar
+synonyms and questions may still get “Jayce don't know.”
+
+The launcher installs dependencies through uv and downloads Qwen on the first parent run.
+Later runs reuse the cached model. Independent chat and data training do not install
+parent libraries.
+
+## Parent model setup
 
 **Requirements:** about 4 GB of free memory and 5 GB of disk, which in practice means a computer
 with 6 GB of memory or more. Jayce stops before loading the model if the computer does not have
 enough memory in total, and on Linux also if too little is free right now, because running out of
-memory can freeze the whole computer. Choose a smaller model with `--model`, close other programs,
+memory can freeze the whole computer. Choose a smaller model in [jayce_config.py](jayce_config.py), close other programs,
 or set `JAYCE_SKIP_MEMORY_CHECK=1` to load it anyway.
+
+If a GGUF model runs out of GPU memory while answering, run `JAYCE_CPU=1 ./jayce`
+to keep its weights and attention computation on the CPU. This is slower and still
+needs enough system memory. The same setting works with `./jayce train`;
+training from a data path does not use a GPU.
 
 ### macOS (Apple silicon), Linux, or WSL
 
@@ -64,12 +152,12 @@ Open **x64 Native Tools Command Prompt for VS** from the Start menu, then run:
 ```bat
 git clone https://github.com/Loophole-LLC/Jayce.git
 cd Jayce
-uv run --locked jayce.py
+uv run --locked --extra parent jayce.py
 ```
 
 uv sets up Python and the dependencies; Jayce downloads the same parent model shown above.
-After setup, run `uv run --locked jayce.py` from the Jayce folder in PowerShell to chat again.
-Use that command wherever the examples below say `./jayce`, and keep commands on one line.
+After setup, run `uv run --locked --extra parent jayce.py` from the Jayce folder in PowerShell to chat again.
+Use that command wherever the parent-mode examples below say `./jayce`, and keep commands on one line.
 
 <details>
 <summary>Windows setup errors</summary>
@@ -77,7 +165,7 @@ Use that command wherever the examples below say `./jayce`, and keep commands on
 **Certificate verification errors:** Tell uv to use the certificates trusted by Windows:
 
 ```bat
-uv --system-certs run --locked jayce.py
+uv --system-certs run --locked --extra parent jayce.py
 ```
 
 This can help on networks with a company proxy or custom certificates.
@@ -129,6 +217,8 @@ Parent (Qwen3-4B-Instruct-2507-Q4_0)> A bicycle has 2 wheels.
   Parent confirms Jayce's answer. No correction needed.
 ```
 
+Current chat also practices and saves confirmed answers again.
+
 Teach an incorrect answer, then let the parent correct it:
 
 ```text
@@ -155,29 +245,25 @@ Jayce (correction)> A triangle has three sides.
 Jayce recalled the corrected answer from the saved file. This time the parent wrote “three” instead
 of “3”, and answers are compared as text, so Jayce learned that wording too.
 
-Qwen answers every turn using weights learned through backpropagation; those weights stay fixed.
-It also represents the question and the answer so far as a list of numbers called a **context
-vector**. Jayce saves these vectors as prototypes, each labeled with the next token—a piece of
-text—or the end of the answer. This [Vector Interception and Token Mapping](#vector-interception-and-token-mapping)
-path builds Jayce's reply from prototype matches, including when it retries after learning.
+With learning on, Qwen answers every turn using fixed pretrained weights. Jayce encodes
+the question and answer prefix using its own native features and stores prototypes labeled
+with the next byte or the end of the answer. Its reply and retry come from these prototype
+matches. Qwen is no longer needed to recall the learned answer in a later session.
 
 <details>
 <summary>Try the conversation yourself</summary>
 
-Start with a new prototype file, then enter the questions and teaching command above:
-
-```sh
-./jayce --prototype-file target/demo-prototypes.npz
-```
-
-Use `/quit` and run the same command to check recall after restarting. Choose another filename
-to start fresh. The default uses the same 4B Instruct model in Q4_K_M quantization; this
-recording used Q4_0. Answers can differ between quantizations and models.
+Run `./jayce` and enter the questions and teaching command above. Use `/quit`, then
+`./jayce --no-parent` to check recall without loading Qwen. Existing memory is reused.
+The recording used Q4_0; the default is Q4_K_M. Parent answers can differ.
 
 </details>
 
-**Jayce can also learn the parent's mistakes.** `/learning off` stops automatic teaching
-from the parent.
+**Jayce can also learn the parent's mistakes.** `/learning off` switches to answers from
+Jayce's memory alone: no parent reply, correction, or automatic learning. Start in this mode
+with `./jayce --no-parent`. In a parent chat, use `/learning on` to resume teaching.
+When Jayce has no strong complete match, it says **Jayce don't know** without asking the parent.
+`./jayce --no-parent` uses the same memories without loading Qwen at all.
 
 ## Benchmark results
 
@@ -263,8 +349,17 @@ prototype slots:
 The update is `prototype += rate * (input - prototype)`. With a rate of 0.1, each value moves
 one tenth of the way toward the new example.
 
-The chat uses token labels and a shared pool of slots. It keeps distinct contexts separate so
-the same token can belong to many saved answers. See [what gets saved](#what-gets-saved).
+The chat uses byte labels and a shared pool of slots. A prototype represents a family
+of question features at one specific answer prefix. New examples can join a nearby
+prototype with the same output if the resulting cluster stays close to its examples
+and separated from competing outputs. Its center is the normalized, practice-weighted
+mean of its question exemplars. Repetition changes those weights.
+
+Question exemplars are stored once and referenced from each answer position. Exact
+taught contexts follow their prototype membership, preserving recall as centers move.
+Unseen wordings use prototype similarity and the margin over a different output.
+Corrections detach the corrected question from its old clusters, recenter the remaining
+members, and teach the replacement. Each emitted byte still comes from a prototype label.
 
 [![JAYCE toy-label lesson](https://loophole.company/assets/jayce-toy-learning.png?v=20260921-2)](https://loophole.company/jayce-toy-learning.html)
 
@@ -274,27 +369,20 @@ scores; similar scores put toys close together, even when their labels differ.
 
 Related reading: [Exemplar theory](https://en.wikipedia.org/wiki/Exemplar_theory).
 
-### Vector Interception and Token Mapping
+### Native text memory
 
-These terms describe how Jayce's chat connects a frozen language model to adaptive prototype memory:
+Jayce converts text into UTF-8 bytes. During teaching, its lesson encoder represents
+the question with shared word, phrase, and character features. A separate fingerprint
+identifies the exact answer prefix plus surface guards for numbers, operators, negation,
+and quoted text. APM associates those features with the next byte or the answer's ending.
+These guards are conservative checks, not a complete parser of meaning.
+Recall follows the associations until the learned ending.
+Weak or ambiguous matches make Jayce withhold the answer. Corrections update the
+associations without changing Qwen's weights.
 
-- **Vector Interception:** `ContextEncoder` reads and normalizes the model's final hidden-state
-  vector for the current question and answer prefix. The vector represents the context before
-  the next token; it does not include the token being predicted.
-- **Token Mapping:** during teaching, `PrototypeResponder` associates each context vector with
-  the next token in the supplied answer, followed by an end-of-answer label. These associations
-  live in a bounded, persistent prototype memory.
-
-During recall, the parent model computes a new context vector at each step. Jayce uses prototype
-matches to select the next token or end the answer. Weak or ambiguous matches make Jayce withhold
-the answer. Parent or user corrections update the stored associations without backpropagation
-or changes to the parent's weights.
-
-The Java classifier benchmarks above do not measure this chat pipeline's speed or memory use.
-
-Related work includes [Generalization through Memorization: Nearest Neighbor Language Models](https://arxiv.org/abs/1911.00172)
-(Khandelwal et al., 2019; ICLR 2020), which uses language-model context representations and
-next-token retrieval without retraining the base model.
+Data training uses a sliding byte context to learn text continuations. Neither form of
+recall needs Qwen. The Java classifier benchmarks above do not measure this chat
+pipeline's speed or memory use.
 
 ## Read the code
 
@@ -312,63 +400,98 @@ Supporting files:
 
 | File | Role |
 |---|---|
-| [jayce_model.py](jayce_model.py) | Load a parent model, generate its answers, and get context vectors |
-| [jayce_config.py](jayce_config.py) | Choose the default parent model |
+| [jayce_cli.py](jayce_cli.py) | Select parent chat, independent recall, or training from the command and data path |
+| [jayce_native.py](jayce_native.py) | Parent-free byte encoders and compatible memory loading |
+| [jayce_checkpoint.py](jayce_checkpoint.py) | Shared writer lock, capacity checks, and graceful interruption |
+| [jayce_lessons.py](jayce_lessons.py) | Shared lesson lookup, verified teaching, and locked atomic saves |
+| [jayce_parent_train.py](jayce_parent_train.py) | Generate lessons from Qwen's knowledge and teach native memory automatically |
+| [jayce_train.py](jayce_train.py) | Stream Parquet text, save progress, and resume training |
+| [jayce_model.py](jayce_model.py) | Load a parent model and generate answers |
+| [jayce_text.py](jayce_text.py) | Learn document tokens directly and measure raw-text continuation |
+| [jayce_config.py](jayce_config.py) | Shared native and parent defaults |
 | [SoftmaxBackpropNetwork.java](benchmark/reference/java/company/loophole/jayce/backprop/SoftmaxBackpropNetwork.java) | The neural network used for comparison |
 
-## Use the chat
+## Chat and teach
 
-Run `./jayce` to chat, or `./jayce --prompt "What does APM stand for?"` for one question.
-Normal chat learns from the parent automatically:
+Run `./jayce` and type a question to chat.
+Normal chat learns from the parent automatically and saves each completed lesson.
+Type `/help` to see the chat commands:
 
 | Command | Purpose |
 |---|---|
-| `/teach question => answer` | Teach one example yourself |
-| `/learn examples/jayce-training.jsonl` | Import the included examples |
-| `/learning off` or `/learning on` | Control automatic teaching from the parent |
-| `/stats` | Show prototype counts and the last match |
-| `/clear` | Clear the parent's conversation history |
-| `/reset-jayce` | Clear learned token prototypes |
-| `/save` | Save token prototypes now (they are also saved after each lesson) |
-| `/model` | Show the loaded model |
-| `/help` | Show all commands |
+| `/teach question => answer` | Teach or correct one answer and save it |
+| `/learning on` or `/learning off` | Turn parent answers and automatic teaching on or off |
+| `/clear` | Clear conversation history while keeping memory |
+| `/stats` | Show memory usage and parent status |
 | `/quit` | Exit |
 
-`/learning off` still allows `/teach` and `/learn`. To try the included facts with automatic
-teaching off:
-
-```sh
-./jayce --no-learning --learn examples/jayce-training.jsonl \
-  --prototype-file target/import-demo.npz
-```
-
-Ask **What is Mira's locker code?** The included answer is **7319.** In an existing chat, enter
-`/learning off` before importing facts to keep the parent from replacing them.
+For example, `/teach What is my favorite color? => Blue` saves an answer you can recall
+from either chat mode. Explicit teaching works while automatic learning is off.
+`/learning on` requires a parent chat; start one with `./jayce`.
 
 ### What gets saved
 
-`jayce-prototypes-<model-key>.npz` stores context vectors and next-token labels, including an ending label.
-The default filename separates models and precision settings automatically; chat startup shows
-the active file. Existing `jayce-prototypes.npz` files are left untouched. To reopen one, select
-its original model and pass `--prototype-file jayce-prototypes.npz`.
+`data/fineweb-edu/native/lessons.npz` stores native context vectors, next-byte labels,
+an ending label, and a catalog of questions and answers. Both chat modes and parent teaching
+use this file regardless of the teacher model or its precision. The question records
+support lookup and memory restoration. Recall still traverses the prototypes; it does not
+return an answer directly from the catalog.
+
+Each chat lesson is checked for complete recall before being saved. Writers reload the
+latest memory under a lock and preserve the parent's training progress. Each verified
+lesson is saved automatically. Open sessions refresh Q&A memory when it changes.
+Corpus text memory is saved alongside the lessons and is read by both run modes.
 Jayce returns an answer only when every token and its ending have a strong match. Otherwise,
 it says **Jayce don't know**.
 
 Jayce uses only the current question, so ask self-contained questions. Rephrased questions may
 not match saved prototypes. The parent also sees the conversation history. Answers are compared
-as text, ignoring whitespace; different wording can trigger teaching. Interrupted or
-length-limited parent answers are not learned.
+as text, ignoring whitespace, to label a reply as confirmation or correction. Both
+go through learning, including exact repeats. Interrupted or length-limited parent
+answers are not learned.
 
-The chat shares **4,096 slots across all token labels**. Distinct contexts get new slots;
-near-identical repeats reuse an existing slot. Parent feedback and `/teach` replace conflicting
-labels for the same context; `/learn` imports examples without replacing conflicting labels.
+New lesson memories share **4,096 slots across all byte labels** (about 8 MiB of
+512-dimensional float32 prototype vectors). They additionally store up to 4,096 shared
+384-dimensional question vectors (about 6 MiB), membership indices and practice counts.
+Atomic updates and Python indices use additional working memory. Existing memories retain
+their saved capacity. Compatible contexts share slots; unrelated contexts get new ones.
+Parent feedback and `/teach` replace conflicting labels for the corrected question.
 
-Longer answers need more slots. Teaching accepts up to 256 tokens per answer; use
-`--max-new-tokens 256` to recall answers beyond the default 128-token reply limit. If a whole
-answer cannot fit in memory, that lesson is rejected and the previous memory stays intact. Use a new
-`--prototype-file` or `/reset-jayce` to start fresh. A strong match can still be wrong.
+Longer answers need more slots. Shared chat lessons accept up to 2,048 UTF-8 bytes, within
+the 4,096-byte question-and-answer context window. Qwen's generation budget remains
+128 model tokens by default; it is separate from Jayce's byte recall budget. If a whole
+answer cannot fit in memory, that lesson is rejected and the previous memory stays intact.
 
-### Choose the parent model
+### Upgrading beta memories
+
+Older `jayce-byte-lessons-v1` files are rebuilt in memory from their saved question/answer
+records. Every record must replay correctly in both the old and new learner. Reading
+does not change the file. The next teaching save preserves the original as
+`lessons.v1-backup.npz` before atomically saving the new version, including pending
+training progress. Rebuilding a large old memory can make its first load slower.
+The rebuild uses one exemplar per latest saved question/answer; historical per-token
+practice weights restart, while overall teaching counters and the old file are retained.
+Raw-text checkpoints keep their existing format.
+
+### Checking pattern transfer
+
+```sh
+.venv/bin/python benchmark/eval_patterns.py
+```
+
+This offline developer check trains separate temporary in-memory learners using the old
+fingerprints and the adaptive features. It reports exact replay, untaught rewordings,
+contrasting facts, unfamiliar questions, synonyms, and new math problems. It never opens
+your saved memory or loads Qwen. It also reports prototype counts and NumPy array bytes;
+those bytes exclude Python overhead and are not peak RAM measurements.
+
+The small fixture is used during development, so its results do not establish broad
+generalization. Pass a separate JSON file with the same `train`/`test` structure as
+`benchmark/patterns.json` for an independent evaluation. New math rules and distant
+synonyms deliberately expose the current learner's limits.
+Increase capacity when training to make room for more lessons. A strong match can still be wrong.
+
+## Choose the parent model
 
 Edit [jayce_config.py](jayce_config.py) and restart:
 
@@ -382,22 +505,18 @@ PARENT_MODEL = (
 Remote GGUF references use `hf://owner/repo/file.gguf`; Jayce downloads just that file and
 caches it. Hugging Face Transformers model IDs and local GGUF paths also work.
 
-Use `--model` to override the config for one run:
-
-```sh
-./jayce --model "/path/to/model.gguf"
-```
-
-Both backends are included in the normal install. The model must be supported by Transformers
-or llama.cpp and supply context vectors. For Transformers only, `JAYCE_DTYPE=float16` selects
+Both parent backends are installed by `./jayce` using the optional `parent` extra. The model must be supported by Transformers
+or llama.cpp. For Transformers only, `JAYCE_DTYPE=float16` selects
 half precision; otherwise it uses float32. GGUF precision is determined by the downloaded file.
-If you specify `--prototype-file` yourself, use separate files for different models or precision,
-because their saved vectors are incompatible.
+Shared native lessons work across teacher models and precision settings.
 
 ## Run the checks
 
 ```sh
-uv run python -m unittest discover -s tests -v
+# Native tests require only NumPy and PyArrow:
+uv run --extra corpus python -m unittest discover -s tests -p 'test_jayce_native.py' -v
+# The complete suite covers both optional dependencies:
+uv run --extra parent --extra corpus python -m unittest discover -s tests -v
 ./benchmark/benchmark-java smoke
 ```
 
