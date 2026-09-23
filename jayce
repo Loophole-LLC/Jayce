@@ -30,7 +30,10 @@ else
 fi
 
 if [[ ! -d "$SCRIPT_DIR/.venv" ]]; then
-  printf 'First run: uv will prepare Python 3.12 and the chat packages.\n'
+  printf 'First run: uv will prepare Python 3.12 and the required packages.\n'
 fi
 
-exec "$JAYCE_UV" run --locked --project "$SCRIPT_DIR" python "$SCRIPT_DIR/jayce.py" "$@"
+# Resolve the mode before installing its optional dependencies. Parent-free
+# chat and data training do not install or import Qwen's libraries.
+exec "$JAYCE_UV" run --locked --inexact --project "$SCRIPT_DIR" \
+  python "$SCRIPT_DIR/jayce_cli.py" "$JAYCE_UV" "$@"

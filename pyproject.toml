@@ -5,12 +5,16 @@
 [project]
 name = "jayce"
 version = "0.1.0"
-description = "Adaptive Prototype Memory learning from a local parent model"
+description = "Adaptive Prototype Memory learning directly from text, with optional parent teaching"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE.md", "NOTICE.md"]
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "numpy==2.5.3",
+]
+
+[project.optional-dependencies]
+parent = [
     "torch==2.14.0",
     "transformers==4.51.0",
     "accelerate==1.10.1",
@@ -19,9 +23,9 @@ dependencies = [
     "llama-cpp-python==0.3.35",
 ]
 
-[project.optional-dependencies]
-# Kept for compatibility with existing `uv run --extra gguf` commands.
-gguf = []
+corpus = [
+    "pyarrow>=25.0.1",
+]
 
 [tool.uv]
 package = false
